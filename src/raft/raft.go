@@ -160,26 +160,28 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	reply.VoteGranted = false
+	reply.Term = rf.currentTerm
+
+	// Reject older terms
 	if args.Term < rf.currentTerm {
-		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
+		return
 	}
 
+	// If RPC's term is greater, update currentTerm and convert to follower
 	if args.Term > rf.currentTerm {
 		rf.votedFor = -1
-		// Si eras Candidate, pasas a Follower y actualizas tu Term
 		rf.state = Follower
 		rf.currentTerm = args.Term
 	}
 
-	// Si no votaste a nadie o si ya lo votaste, se concede el voto
+	// If haven't voted or voted for candidate, grant vote
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-		reply.Term = rf.currentTerm
 		rf.lastContact = time.Now()
+		rf.electionTimeout = time.Duration(400+rand.Intn(200)) * time.Millisecond
 	}
-
 }
 
 // AppendEntries RPC
@@ -209,10 +211,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.votedFor = -1
 		rf.currentTerm = args.Term
-		rf.state = Follower
-		rf.lastContact = time.Now()
-		reply.Success = true
 	}
+
+	rf.state = Follower
+	rf.lastContact = time.Now()
+	reply.Success = true
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -375,8 +378,8 @@ func (rf *Raft) requestVoteFromPeer(server int, term int, me int, votes *int32, 
 
 	// If still candidate and vote granted, increment votes
 	if rf.state == Candidate && reply.VoteGranted {
-		*votes++
-		if *votes > int32(total/2) {
+		// If got majority, become leader
+		if atomic.AddInt32(votes, 1) > int32(total/2) && rf.state == Candidate {
 			rf.state = Leader
 			rf.lastContact = time.Now()
 		}
@@ -384,16 +387,12 @@ func (rf *Raft) requestVoteFromPeer(server int, term int, me int, votes *int32, 
 }
 
 func (rf *Raft) sendHeartbeats() {
+	rf.mu.Lock()
 	if rf.state != Leader {
+		rf.mu.Unlock()
 		return
 	}
-
-	rf.mu.Lock()
-
-	args := AppendEntriesArgs{
-		Term:     rf.currentTerm,
-		LeaderId: rf.me,
-	}
+	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
 	rf.mu.Unlock()
 
 	// send AppendEntries RPCs (heartbeats) to all other servers
