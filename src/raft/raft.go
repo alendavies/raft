@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -162,7 +163,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
-		return
 	}
 
 	if args.Term > rf.currentTerm {
@@ -296,12 +296,134 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 
+		time.Sleep(100 * time.Millisecond)
+
+		rf.mu.Lock()
+		elapsed := time.Since(rf.lastContact)
+		timeout := rf.electionTimeout
+		isLeader := rf.state == Leader
+		rf.mu.Unlock()
+
+		if isLeader {
+			// if i'm leader, send heartbeats
+			rf.sendHeartbeats()
+		} else if elapsed >= timeout {
+			// if timeout elapsed, start election
+			rf.startElection()
+
+			// reset election timeout to a new random value
+			rf.mu.Lock()
+			rf.electionTimeout = time.Duration(400+rand.Intn(200)) * time.Millisecond
+			rf.mu.Unlock()
+		}
+	}
+}
+
+func (rf *Raft) startElection() {
+	rf.mu.Lock()
+
+	// become candidate, vote for self, reset timer
+	rf.state = Candidate
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	rf.lastContact = time.Now()
+
+	term := rf.currentTerm
+	me := rf.me
+	rf.mu.Unlock()
+
+	votes := int32(1)
+	total := len(rf.peers)
+
+	// send RequestVote RPCs to all other servers
+	for i := range rf.peers {
+		if i == me {
+			continue
+		}
+
+		go rf.requestVoteFromPeer(i, term, me, &votes, total)
+	}
+}
+
+func (rf *Raft) requestVoteFromPeer(server int, term int, me int, votes *int32, total int) {
+	args := RequestVoteArgs{Term: term, CandidateId: me}
+	var reply RequestVoteReply
+
+	ok := rf.sendRequestVote(server, &args, &reply)
+
+	// If RPC failed, do nothing
+	if !ok {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// If reply's term is greater, update currentTerm and convert to follower
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.votedFor = -1
+		rf.state = Follower
+		return
+	}
+
+	// If still candidate and vote granted, increment votes
+	if rf.state == Candidate && reply.VoteGranted {
+		*votes++
+		if *votes > int32(total/2) {
+			rf.state = Leader
+			rf.lastContact = time.Now()
+		}
+	}
+}
+
+func (rf *Raft) sendHeartbeats() {
+	if rf.state != Leader {
+		return
+	}
+
+	rf.mu.Lock()
+
+	args := AppendEntriesArgs{
+		Term:     rf.currentTerm,
+		LeaderId: rf.me,
+	}
+	rf.mu.Unlock()
+
+	// send AppendEntries RPCs (heartbeats) to all other servers
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+
+		go rf.sendHeartbeatToPeer(i, &args)
+	}
+}
+
+func (rf *Raft) sendHeartbeatToPeer(server int, args *AppendEntriesArgs) {
+	var reply AppendEntriesReply
+	ok := rf.sendAppendEntries(server, args, &reply)
+
+	// If RPC failed, do nothing
+	if !ok {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// if reply's term is greater, update currentTerm and convert to follower
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.state = Follower
+		rf.votedFor = -1
+		rf.lastContact = time.Now()
 	}
 }
 
@@ -326,7 +448,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.state = Follower
 	rf.lastContact = time.Now()
-	rf.electionTimeout = 500 * time.Millisecond
+	rf.electionTimeout = time.Duration(400+rand.Intn(200)) * time.Millisecond
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
