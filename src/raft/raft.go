@@ -189,17 +189,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = Follower
+rf.lastContact = time.Now()
 		reply.Term = rf.currentTerm
 	}
 
-	// Record contact
-	rf.lastContact = time.Now()
+	// Get last log index and term of receiver
+	lastLogIndex := len(rf.log) - 1
+	lastLogTerm := rf.log[lastLogIndex].Term
+
+	// Reject if candidate's log is not at least as up-to-date as receiver's log
+	if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
+		return
+	}
 
 	// Grant vote if not voted or same candidate
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		rf.electionTimeout = randomElectionTimeout()
+rf.lastContact = time.Now()
 	}
 }
 
