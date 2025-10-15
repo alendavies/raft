@@ -417,8 +417,8 @@ func (rf *Raft) ticker() {
 		rf.mu.Unlock()
 
 		if isLeader {
-			// if i'm leader, send heartbeats
-			rf.sendHeartbeats()
+			// if i'm leader, send heartbeats and entries
+			rf.sendEntries()
 		} else if elapsed >= timeout {
 			// if timeout elapsed, start election
 			rf.startElection()
@@ -444,6 +444,9 @@ func (rf *Raft) startElection() {
 
 	term := rf.currentTerm
 	me := rf.me
+
+	lastLogIndex := len(rf.log) - 1
+	lastLogTerm := rf.log[lastLogIndex].Term
 	rf.mu.Unlock()
 
 	votes := int32(1)
@@ -455,15 +458,17 @@ func (rf *Raft) startElection() {
 			continue
 		}
 
-		go rf.requestVoteFromPeer(i, term, me, &votes, total)
+args := RequestVoteArgs{Term: term, CandidateId: me, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
+
+		go rf.requestVoteFromPeer(i, &votes, total, &args)
 	}
 }
 
-func (rf *Raft) requestVoteFromPeer(server int, term int, me int, votes *int32, total int) {
-	args := RequestVoteArgs{Term: term, CandidateId: me}
+func (rf *Raft) requestVoteFromPeer(server int, votes *int32, total int, args *RequestVoteArgs) {
+
 	var reply RequestVoteReply
 
-	ok := rf.sendRequestVote(server, &args, &reply)
+	ok := rf.sendRequestVote(server, args, &reply)
 
 	// If RPC failed, do nothing
 	if !ok {
@@ -487,15 +492,23 @@ func (rf *Raft) requestVoteFromPeer(server int, term int, me int, votes *int32, 
 		if atomic.AddInt32(votes, 1) > int32(total/2) {
 			rf.state = Leader
 			rf.lastContact = time.Now()
+		
+			// Initialize nextIndex and matchIndex for each server
+			for i := range rf.peers {
+				rf.nextIndex[i] = len(rf.log)
+				rf.matchIndex[i] = 0
+			}
 		}
+
 	}
 }
 
-func (rf *Raft) sendHeartbeats() {
+func (rf *Raft) sendEntries() {
 	rf.mu.Lock()
+defer rf.mu.Unlock()
+
 	if rf.state != Leader {
-		rf.mu.Unlock()
-		return
+				return
 	}
 
 	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
@@ -507,11 +520,26 @@ func (rf *Raft) sendHeartbeats() {
 			continue
 		}
 
-		go rf.sendHeartbeatToPeer(i, &args)
+		prevLogIndex := rf.nextIndex[i] - 1
+		prevLogTerm := rf.log[prevLogIndex].Term
+		entries := make([]LogEntry, len(rf.log[rf.nextIndex[i]:]))
+
+		copy(entries, rf.log[rf.nextIndex[i]:])
+
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      entries,
+			LeaderCommit: rf.commitedIndex,
+		}
+
+		go rf.sendEntriesToPeer(i, &args)
 	}
 }
 
-func (rf *Raft) sendHeartbeatToPeer(server int, args *AppendEntriesArgs) {
+func (rf *Raft) sendEntriesToPeer(server int, args *AppendEntriesArgs) {
 	var reply AppendEntriesReply
 	ok := rf.sendAppendEntries(server, args, &reply)
 
