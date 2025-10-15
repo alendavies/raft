@@ -479,6 +479,16 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// initialize random election timeout between 400-600ms
 	rf.electionTimeout = randomElectionTimeout()
 
+	rf.log = make([]LogEntry, 1)
+	rf.log[0] = LogEntry{Term: 0, Command: nil} // Dummy entry
+
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	for i := range rf.peers {
+		rf.nextIndex[i] = 1
+		rf.matchIndex[i] = 0
+	}
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
