@@ -58,6 +58,11 @@ const (
 	Leader
 )
 
+type LogEntry struct {
+	Command interface{}
+	Term    int
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -74,6 +79,12 @@ type Raft struct {
 	state           State
 	lastContact     time.Time
 	electionTimeout time.Duration
+
+	log           []LogEntry
+	commitedIndex int
+	lastApplied   int
+	nextIndex     []int
+	matchIndex    []int
 }
 
 // return currentTerm and whether this server
