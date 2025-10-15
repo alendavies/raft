@@ -224,6 +224,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 	reply.Success = false
+reply.ConflictTerm = -1
+	reply.ConflictIndex = -1
 
 	// Reject old terms
 	if args.Term < rf.currentTerm {
@@ -231,10 +233,65 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// If leader's term is greater, update currentTerm and convert to follower
-	if args.Term > rf.currentTerm {
+	if args.Term >= rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = Follower
+	}
+
+	// Reject if log doesn't contain an entry at prevLogIndex
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.ConflictIndex = len(rf.log)
+		reply.ConflictTerm = -1
+		return
+	}
+
+	// Reject if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+
+		// Find the first index with ConflictTerm
+		reply.ConflictIndex = args.PrevLogIndex
+		for i := args.PrevLogIndex - 1; i >= 0; i-- {
+			if rf.log[i].Term != reply.ConflictTerm {
+				break
+			}
+			reply.ConflictIndex = i
+		}
+		return
+	}
+
+	// If an existing entry conflicts with a new one (same index but different terms),
+	// delete the existing entry and all that follow it
+	for i, newEntry := range args.Entries {
+		// Log index where this entry should go
+		logIndex := args.PrevLogIndex + 1 + i
+
+		// If the index is beyond the end of the log, break the loop
+		if logIndex >= len(rf.log) {
+			break
+		}
+
+		// If terms differ, truncate the log at this index
+		if rf.log[logIndex].Term != newEntry.Term {
+			rf.log = rf.log[:logIndex]
+			break
+		}
+	}
+
+	// Append any new entries not already in the log
+	startIndex := args.PrevLogIndex + 1
+
+	for i, newEntry := range args.Entries {
+		logIndex := startIndex + i
+
+		if logIndex >= len(rf.log) {
+			rf.log = append(rf.log, newEntry)
+		}
+	}
+
+	if args.LeaderCommit > rf.commitedIndex {
+		rf.commitedIndex = min(args.LeaderCommit, len(rf.log)-1)
 	}
 
 	// reset contact time
