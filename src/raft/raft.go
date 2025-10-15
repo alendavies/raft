@@ -189,7 +189,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = Follower
-rf.lastContact = time.Now()
+		rf.lastContact = time.Now()
 		reply.Term = rf.currentTerm
 	}
 
@@ -207,7 +207,7 @@ rf.lastContact = time.Now()
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		rf.electionTimeout = randomElectionTimeout()
-rf.lastContact = time.Now()
+		rf.lastContact = time.Now()
 	}
 }
 
@@ -222,8 +222,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictTerm  int // Term of the conflicting entry
+	ConflictIndex int // First index of that term
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -232,7 +234,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 	reply.Success = false
-reply.ConflictTerm = -1
+	reply.ConflictTerm = -1
 	reply.ConflictIndex = -1
 
 	// Reject old terms
@@ -359,7 +361,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-// Your code here (2B).
+	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -458,7 +460,7 @@ func (rf *Raft) startElection() {
 			continue
 		}
 
-args := RequestVoteArgs{Term: term, CandidateId: me, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
+		args := RequestVoteArgs{Term: term, CandidateId: me, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
 
 		go rf.requestVoteFromPeer(i, &votes, total, &args)
 	}
@@ -492,7 +494,7 @@ func (rf *Raft) requestVoteFromPeer(server int, votes *int32, total int, args *R
 		if atomic.AddInt32(votes, 1) > int32(total/2) {
 			rf.state = Leader
 			rf.lastContact = time.Now()
-		
+
 			// Initialize nextIndex and matchIndex for each server
 			for i := range rf.peers {
 				rf.nextIndex[i] = len(rf.log)
@@ -505,14 +507,11 @@ func (rf *Raft) requestVoteFromPeer(server int, votes *int32, total int, args *R
 
 func (rf *Raft) sendEntries() {
 	rf.mu.Lock()
-defer rf.mu.Unlock()
+	defer rf.mu.Unlock()
 
 	if rf.state != Leader {
-				return
+		return
 	}
-
-	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
-	rf.mu.Unlock()
 
 	// send AppendEntries RPCs (heartbeats) to all other servers
 	for i := range rf.peers {
@@ -557,6 +556,82 @@ func (rf *Raft) sendEntriesToPeer(server int, args *AppendEntriesArgs) {
 		rf.state = Follower
 		rf.votedFor = -1
 		rf.lastContact = time.Now()
+		return
+	}
+
+	// If not leader or term changed, ignore
+	if rf.state != Leader || args.Term != rf.currentTerm {
+		return
+	}
+
+	if reply.Success {
+		// Follower accepted the entries
+		newMatchIndex := args.PrevLogIndex + len(args.Entries)
+		if newMatchIndex > rf.matchIndex[server] {
+			rf.matchIndex[server] = newMatchIndex    // Follower has entries up to this index
+			rf.nextIndex[server] = newMatchIndex + 1 // Next entry to send is after this
+		}
+
+		// Try to advance commitIndex
+		rf.updateCommitIndex()
+	} else {
+		// Follower rejected, use conflict information to backup faster
+		if reply.ConflictTerm == -1 {
+			// Follower's log is too short (doesn't have PrevLogIndex)
+			// Jump back to the end of follower's log
+			rf.nextIndex[server] = reply.ConflictIndex
+		} else {
+			// Follower has a conflicting entry at PrevLogIndex with term ConflictTerm
+			// Search backwards in leader's log for the last entry with that term
+			lastIndexOfTerm := -1
+			for i := len(rf.log) - 1; i >= 0; i-- {
+				if rf.log[i].Term == reply.ConflictTerm {
+					lastIndexOfTerm = i
+					break
+				}
+			}
+
+			if lastIndexOfTerm != -1 {
+				// Leader also has entries with term ConflictTerm
+				// Start sending from right after leader's last entry with that term
+				rf.nextIndex[server] = lastIndexOfTerm + 1
+			} else {
+				// Leader doesn't have any entries with term ConflictTerm
+				// Jump back to where that term starts in follower's log
+				rf.nextIndex[server] = reply.ConflictIndex
+			}
+		}
+
+		// never let nextIndex go below 1
+		if rf.nextIndex[server] < 1 {
+			rf.nextIndex[server] = 1
+		}
+	}
+}
+
+func (rf *Raft) updateCommitIndex() {
+	// Find the highest index N such that N > commitIndex
+	for n := len(rf.log) - 1; n > rf.commitedIndex; n-- {
+		if rf.log[n].Term != rf.currentTerm {
+			continue
+		}
+
+		// Count how many servers have matchIndex >= N
+		count := 1 // include self
+		for i := range rf.peers {
+			if i != rf.me && rf.matchIndex[i] >= n {
+				count++
+			}
+		}
+
+		// If a majority have matchIndex >= N, update commitIndex
+		if count > len(rf.peers)/2 {
+			rf.commitedIndex = n
+			break
+		}
+	}
+}
+
 func (rf *Raft) applier(applyCh chan ApplyMsg) {
 	for !rf.killed() {
 		time.Sleep(100 * time.Millisecond)
