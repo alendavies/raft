@@ -359,11 +359,23 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := rf.state == Leader
 
-	// Your code here (2B).
+	if !isLeader {
+		return index, term, isLeader
+	}
+
+	// if i'm leader, append to log
+	rf.log = append(rf.log, LogEntry{Command: command, Term: rf.currentTerm})
+
+	index = len(rf.log) - 1
+	term = rf.currentTerm
 
 	return index, term, isLeader
 }
