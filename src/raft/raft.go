@@ -557,6 +557,27 @@ func (rf *Raft) sendEntriesToPeer(server int, args *AppendEntriesArgs) {
 		rf.state = Follower
 		rf.votedFor = -1
 		rf.lastContact = time.Now()
+func (rf *Raft) applier(applyCh chan ApplyMsg) {
+	for !rf.killed() {
+		time.Sleep(100 * time.Millisecond)
+
+		rf.mu.Lock()
+
+		toApply := []ApplyMsg{}
+		for rf.lastApplied < rf.commitedIndex {
+			rf.lastApplied++
+			toApply = append(toApply, ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[rf.lastApplied].Command,
+				CommandIndex: rf.lastApplied,
+			})
+		}
+
+		rf.mu.Unlock()
+
+		for _, msg := range toApply {
+			applyCh <- msg
+		}
 	}
 }
 
@@ -599,6 +620,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	// start applier goroutine to apply committed entries
+	go rf.applier(applyCh)
 
 	return rf
 }
