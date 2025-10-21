@@ -40,6 +40,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = Follower
 		rf.lastContact = time.Now()
 		reply.Term = rf.currentTerm
+		rf.persist()
 	}
 
 	// Get last log index and term of receiver
@@ -57,6 +58,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.electionTimeout = randomElectionTimeout()
 		rf.lastContact = time.Now()
+		rf.persist()
 	}
 }
 
@@ -96,6 +98,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = Follower
+		rf.persist()
 	}
 
 	// Reject if log doesn't contain an entry at prevLogIndex
@@ -134,6 +137,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// If terms differ, truncate the log at this index
 		if rf.log[logIndex].Term != newEntry.Term {
 			rf.log = rf.log[:logIndex]
+			rf.persist()
 			break
 		}
 	}
@@ -146,6 +150,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		if logIndex >= len(rf.log) {
 			rf.log = append(rf.log, newEntry)
+			rf.persist()
 		}
 	}
 

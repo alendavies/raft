@@ -55,6 +55,7 @@ func (rf *Raft) sendEntriesToPeer(server int, args *AppendEntriesArgs) {
 		rf.state = Follower
 		rf.votedFor = -1
 		rf.lastContact = time.Now()
+		rf.persist()
 		return
 	}
 

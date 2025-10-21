@@ -18,11 +18,13 @@ package raft
 //
 
 import (
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -112,7 +114,7 @@ func (rf *Raft) persist() {
 	encoder.Encode(rf.votedFor)
 	encoder.Encode(rf.log)
 	data := buffer.Bytes()
-rf.persister.SaveRaftState(data)
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -182,6 +184,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// if i'm leader, append to log
 	rf.log = append(rf.log, LogEntry{Command: command, Term: rf.currentTerm})
+	rf.persist()
 
 	index = len(rf.log) - 1
 	term = rf.currentTerm

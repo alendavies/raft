@@ -17,6 +17,8 @@ func (rf *Raft) startElection() {
 	rf.lastContact = time.Now()
 	rf.electionTimeout = randomElectionTimeout()
 
+	rf.persist()
+
 	term := rf.currentTerm
 	me := rf.me
 
@@ -59,6 +61,7 @@ func (rf *Raft) requestVoteFromPeer(server int, votes *int32, total int, args *R
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
 		rf.state = Follower
+		rf.persist()
 		return
 	}
 
