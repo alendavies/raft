@@ -314,5 +314,5 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 }
 
 func randomElectionTimeout() time.Duration {
-	return time.Duration(400+rand.Intn(200)) * time.Millisecond
+	return time.Duration(600+rand.Intn(200)) * time.Millisecond
 }
