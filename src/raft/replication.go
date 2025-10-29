@@ -11,7 +11,7 @@ func (rf *Raft) sendEntries() {
 		return
 	}
 
-		for i := range rf.peers {
+	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
@@ -127,6 +127,73 @@ func (rf *Raft) sendEntriesToPeer(server int, args *AppendEntriesArgs) {
 		if rf.nextIndex[server] < 1 {
 			rf.nextIndex[server] = 1
 		}
+	}
+}
+
+func (rf *Raft) sendSnapshot() {
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
+
+	term := rf.currentTerm
+	leaderId := rf.me
+	snapshot := rf.snapshot
+	lastIncludedIndex := rf.lastIncludedIndex
+	lastIncludedTerm := rf.lastIncludedTerm
+	rf.mu.Unlock()
+
+	for i := range rf.peers {
+		if i == leaderId {
+			continue
+		}
+
+		// Only send snapshot to followers that are behind the snapshot
+		rf.mu.Lock()
+		needSnapshot := rf.nextIndex[i] <= lastIncludedIndex
+		rf.mu.Unlock()
+
+		if needSnapshot {
+			go rf.sendInstallSnapshotToPeer(i, term, leaderId, lastIncludedIndex, lastIncludedTerm, snapshot)
+		}
+	}
+}
+
+func (rf *Raft) sendInstallSnapshotToPeer(
+	server int, term int, leaderId int,
+	lastIncludedIndex int, lastIncludedTerm int, snapshot []byte,
+) {
+	args := InstallSnapshotArgs{
+		Term:              term,
+		LeaderId:          leaderId,
+		LastIncludedIndex: lastIncludedIndex,
+		LastIncludedTerm:  lastIncludedTerm,
+		Data:              snapshot,
+	}
+
+	var reply InstallSnapshotReply
+	ok := rf.sendInstallSnapshot(server, &args, &reply)
+	if !ok {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// If term is newer, update currentTerm and convert to follower
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.state = Follower
+		rf.votedFor = -1
+		rf.persist()
+		return
+	}
+
+	// If still leader and term matches, update nextIndex and matchIndex
+	if rf.state == Leader && reply.Term == rf.currentTerm {
+		rf.matchIndex[server] = lastIncludedIndex
+		rf.nextIndex[server] = lastIncludedIndex + 1
 	}
 }
 
