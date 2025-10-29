@@ -5,7 +5,7 @@ import "time"
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-		Term         int
+	Term         int
 	CandidateId  int
 	LastLogIndex int
 	LastLogTerm  int
@@ -14,7 +14,7 @@ type RequestVoteArgs struct {
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-		Term        int
+	Term        int
 	VoteGranted bool
 }
 
@@ -123,9 +123,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// find slice index of first entry in that term
 		firstSlice := prevSliceIdx
 		for firstSlice > 0 && rf.log[firstSlice-1].Term == reply.ConflictTerm {
-				firstSlice--
-			}
-			reply.ConflictIndex = rf.lastIncludedIndex + firstSlice
+			firstSlice--
+		}
+		reply.ConflictIndex = rf.lastIncludedIndex + firstSlice
 		return
 	}
 
@@ -144,10 +144,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				// append remaining new entries
 				rf.log = append(rf.log, args.Entries[i:]...)
 				rf.persist()
-			break
-		}
-} else {
-		// follower is missing this entry; append remaining entries
+				break
+			}
+		} else {
+			// follower is missing this entry; append remaining entries
 			rf.log = append(rf.log, args.Entries[i:]...)
 			rf.persist()
 			break
@@ -163,6 +163,61 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.lastContact = time.Now()
 
 	reply.Success = true
+	reply.Term = rf.currentTerm
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.Term = rf.currentTerm
+
+	// If term is older, ignore
+	if args.Term < rf.currentTerm {
+		return
+	}
+
+	// If term is newer, update currentTerm and convert to follower
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.state = Follower
+		rf.persist()
+	}
+	rf.lastContact = time.Now()
+
+	// if i already committed at least up to LastIncludedIndex, ignore
+	if args.LastIncludedIndex <= rf.committedIndex {
+		return
+	}
+
+	// Send snapshot to applyCh
+	snap := make([]byte, len(args.Data))
+	copy(snap, args.Data)
+	lastIdx := args.LastIncludedIndex
+	lastTerm := args.LastIncludedTerm
+
+	rf.mu.Unlock()
+	rf.applyCh <- ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      snap,
+		SnapshotTerm:  lastTerm,
+		SnapshotIndex: lastIdx,
+	}
+	rf.mu.Lock()
+
 	reply.Term = rf.currentTerm
 }
 
@@ -200,5 +255,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
