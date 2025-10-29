@@ -82,11 +82,17 @@ type Raft struct {
 	lastContact     time.Time
 	electionTimeout time.Duration
 
-	log           []LogEntry
-	commitedIndex int
-	lastApplied   int
-	nextIndex     []int
-	matchIndex    []int
+	log            []LogEntry
+	committedIndex int
+	lastApplied    int
+	nextIndex      []int
+	matchIndex     []int
+
+	lastIncludedIndex int // global index of rf.log[0] (last included in snapshot)
+	lastIncludedTerm  int // term of that index
+
+	applyCh  chan ApplyMsg
+	snapshot []byte
 }
 
 // return currentTerm and whether this server
@@ -170,8 +176,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	// Your code here (2B).
-	rf.mu.Lock()
+		rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	index := -1
@@ -184,10 +189,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// if i'm leader, append to log
 	rf.log = append(rf.log, LogEntry{Command: command, Term: rf.currentTerm})
+index = rf.lastLogIndex()
 	rf.persist()
 
-	index = len(rf.log) - 1
-	term = rf.currentTerm
+		term = rf.currentTerm
 
 	return index, term, isLeader
 }
@@ -250,11 +255,14 @@ func (rf *Raft) applier(applyCh chan ApplyMsg) {
 		rf.mu.Lock()
 
 		toApply := []ApplyMsg{}
-		for rf.lastApplied < rf.commitedIndex {
+		for rf.lastApplied < rf.committedIndex {
 			rf.lastApplied++
+sliceIdx := rf.sliceIndex(rf.lastApplied)
+			cmd := rf.log[sliceIdx].Command
+
 			toApply = append(toApply, ApplyMsg{
 				CommandValid: true,
-				Command:      rf.log[rf.lastApplied].Command,
+				Command:      cmd,
 				CommandIndex: rf.lastApplied,
 			})
 		}
@@ -311,6 +319,20 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	go rf.applier(applyCh)
 
 	return rf
+}
+
+// helper: global last log index
+func (rf *Raft) lastLogIndex() int {
+	return rf.lastIncludedIndex + len(rf.log) - 1
+}
+
+func (rf *Raft) lastLogTerm() int {
+	return rf.log[len(rf.log)-1].Term
+}
+
+// translate global index -> rf.log slice index
+func (rf *Raft) sliceIndex(globalIdx int) int {
+	return globalIdx - rf.lastIncludedIndex
 }
 
 func randomElectionTimeout() time.Duration {

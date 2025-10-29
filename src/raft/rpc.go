@@ -5,8 +5,7 @@ import "time"
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         int
+		Term         int
 	CandidateId  int
 	LastLogIndex int
 	LastLogTerm  int
@@ -15,8 +14,7 @@ type RequestVoteArgs struct {
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (2A).
-	Term        int
+		Term        int
 	VoteGranted bool
 }
 
@@ -44,8 +42,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// Get last log index and term of receiver
-	lastLogIndex := len(rf.log) - 1
-	lastLogTerm := rf.log[lastLogIndex].Term
+	lastLogIndex := rf.lastLogIndex()
+	lastLogTerm := rf.lastLogTerm()
 
 	// Reject if candidate's log is not at least as up-to-date as receiver's log
 	if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
@@ -101,61 +99,64 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persist()
 	}
 
-	// Reject if log doesn't contain an entry at prevLogIndex
-	if args.PrevLogIndex >= len(rf.log) {
-		reply.ConflictIndex = len(rf.log)
+	// If leader's PrevLogIndex is before our snapshot, tell leader we need a snapshot install
+	if args.PrevLogIndex < rf.lastIncludedIndex {
+		// leader is too far behind; instruct it about our snapshot boundary
+		reply.ConflictIndex = rf.lastIncludedIndex
+		reply.ConflictTerm = rf.lastIncludedTerm
+		return
+	}
+
+	// If leader's PrevLogIndex is beyond our last log index, tell leader where our log ends
+	if args.PrevLogIndex > rf.lastLogIndex() {
+		reply.ConflictIndex = rf.lastLogIndex() + 1
 		reply.ConflictTerm = -1
 		return
 	}
 
-	// Reject if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+	// Now PrevLogIndex is within our stored suffix: check term match
+	prevSliceIdx := rf.sliceIndex(args.PrevLogIndex)
+	if rf.log[prevSliceIdx].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[prevSliceIdx].Term
 
-		// Find the first index with ConflictTerm
-		reply.ConflictIndex = args.PrevLogIndex
-		for i := args.PrevLogIndex - 1; i >= 0; i-- {
-			if rf.log[i].Term != reply.ConflictTerm {
-				break
+		// find first index (global) where that ConflictTerm appears
+		// find slice index of first entry in that term
+		firstSlice := prevSliceIdx
+		for firstSlice > 0 && rf.log[firstSlice-1].Term == reply.ConflictTerm {
+				firstSlice--
 			}
-			reply.ConflictIndex = i
-		}
+			reply.ConflictIndex = rf.lastIncludedIndex + firstSlice
 		return
 	}
 
-	// If an existing entry conflicts with a new one (same index but different terms),
-	// delete the existing entry and all that follow it
-	for i, newEntry := range args.Entries {
-		// Log index where this entry should go
-		logIndex := args.PrevLogIndex + 1 + i
+	// At this point PrevLogIndex matches. Merge entries:
+	// startSlice is index in rf.log corresponding to args.PrevLogIndex+1
+	startGlobal := args.PrevLogIndex + 1
+	startSlice := rf.sliceIndex(startGlobal)
 
-		// If the index is beyond the end of the log, break the loop
-		if logIndex >= len(rf.log) {
+	// Iterate through incoming entries and reconcile with existing log
+	for i := 0; i < len(args.Entries); i++ {
+		si := startSlice + i
+		if si < len(rf.log) {
+			// If conflict, truncate and append the rest
+			if rf.log[si].Term != args.Entries[i].Term {
+				rf.log = rf.log[:si]
+				// append remaining new entries
+				rf.log = append(rf.log, args.Entries[i:]...)
+				rf.persist()
 			break
 		}
-
-		// If terms differ, truncate the log at this index
-		if rf.log[logIndex].Term != newEntry.Term {
-			rf.log = rf.log[:logIndex]
+} else {
+		// follower is missing this entry; append remaining entries
+			rf.log = append(rf.log, args.Entries[i:]...)
 			rf.persist()
 			break
 		}
 	}
 
-	// Append any new entries not already in the log
-	startIndex := args.PrevLogIndex + 1
-
-	for i, newEntry := range args.Entries {
-		logIndex := startIndex + i
-
-		if logIndex >= len(rf.log) {
-			rf.log = append(rf.log, newEntry)
-			rf.persist()
-		}
-	}
-
-	if args.LeaderCommit > rf.commitedIndex {
-		rf.commitedIndex = min(args.LeaderCommit, len(rf.log)-1)
+	// Update commit index (global indexes)
+	if args.LeaderCommit > rf.committedIndex {
+		rf.committedIndex = min(args.LeaderCommit, rf.lastLogIndex())
 	}
 
 	// reset contact time

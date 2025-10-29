@@ -11,17 +11,39 @@ func (rf *Raft) sendEntries() {
 		return
 	}
 
-	// send AppendEntries RPCs (heartbeats) to all other servers
-	for i := range rf.peers {
+		for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 
-		prevLogIndex := rf.nextIndex[i] - 1
-		prevLogTerm := rf.log[prevLogIndex].Term
-		entries := make([]LogEntry, len(rf.log[rf.nextIndex[i]:]))
+		ni := rf.nextIndex[i]
 
-		copy(entries, rf.log[rf.nextIndex[i]:])
+		if ni <= rf.lastIncludedIndex {
+			continue
+		}
+
+		prevLogIndex := ni - 1
+
+		var prevLogTerm int
+		if prevLogIndex == rf.lastIncludedIndex {
+			prevLogTerm = rf.lastIncludedTerm
+		} else {
+			si := rf.sliceIndex(prevLogIndex)
+			if si < 0 || si >= len(rf.log) {
+				continue
+			}
+			prevLogTerm = rf.log[si].Term
+		}
+
+		start := rf.sliceIndex(ni)
+		if start < 0 {
+			start = 0
+		}
+		if start > len(rf.log) {
+			start = len(rf.log)
+		}
+		entries := make([]LogEntry, len(rf.log[start:]))
+		copy(entries, rf.log[start:])
 
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
@@ -29,9 +51,8 @@ func (rf *Raft) sendEntries() {
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
 			Entries:      entries,
-			LeaderCommit: rf.commitedIndex,
+			LeaderCommit: rf.committedIndex,
 		}
-
 		go rf.sendEntriesToPeer(i, &args)
 	}
 }
@@ -86,7 +107,7 @@ func (rf *Raft) sendEntriesToPeer(server int, args *AppendEntriesArgs) {
 			lastIndexOfTerm := -1
 			for i := len(rf.log) - 1; i >= 0; i-- {
 				if rf.log[i].Term == reply.ConflictTerm {
-					lastIndexOfTerm = i
+					lastIndexOfTerm = rf.lastIncludedIndex + i // convert to global
 					break
 				}
 			}
@@ -112,8 +133,8 @@ func (rf *Raft) sendEntriesToPeer(server int, args *AppendEntriesArgs) {
 // updateCommitIndex updates the commit index based on matchIndex of followers
 func (rf *Raft) updateCommitIndex() {
 	// Find the highest index N such that N > commitIndex
-	for n := len(rf.log) - 1; n > rf.commitedIndex; n-- {
-		if rf.log[n].Term != rf.currentTerm {
+	for n := rf.lastLogIndex(); n > max(rf.committedIndex, rf.lastIncludedIndex); n-- {
+		if rf.log[rf.sliceIndex(n)].Term != rf.currentTerm {
 			continue
 		}
 
@@ -127,7 +148,7 @@ func (rf *Raft) updateCommitIndex() {
 
 		// If a majority have matchIndex >= N, update commitIndex
 		if count > len(rf.peers)/2 {
-			rf.commitedIndex = n
+			rf.committedIndex = n
 			break
 		}
 	}

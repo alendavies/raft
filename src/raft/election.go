@@ -22,8 +22,8 @@ func (rf *Raft) startElection() {
 	term := rf.currentTerm
 	me := rf.me
 
-	lastLogIndex := len(rf.log) - 1
-	lastLogTerm := rf.log[lastLogIndex].Term
+	lastLogIndex := rf.lastLogIndex()
+	lastLogTerm := rf.lastLogTerm()
 	rf.mu.Unlock()
 
 	votes := int32(1)
@@ -74,8 +74,8 @@ func (rf *Raft) requestVoteFromPeer(server int, votes *int32, total int, args *R
 
 			// Initialize nextIndex and matchIndex for each server
 			for i := range rf.peers {
-				rf.nextIndex[i] = len(rf.log)
-				rf.matchIndex[i] = 0
+				rf.nextIndex[i] = rf.lastLogIndex() + 1
+				rf.matchIndex[i] = rf.lastIncludedIndex
 			}
 		}
 
