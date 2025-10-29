@@ -113,36 +113,47 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	buffer := new(bytes.Buffer)
-	encoder := labgob.NewEncoder(buffer)
-	encoder.Encode(rf.currentTerm)
-	encoder.Encode(rf.votedFor)
-	encoder.Encode(rf.log)
-	data := buffer.Bytes()
-	rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
+	e.Encode(rf.log)
+	data := w.Bytes()
+
+	rf.persister.SaveStateAndSnapshot(data, rf.snapshot)
 }
 
-// restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
-	if len(data) == 0 { // bootstrap without any state?
+func (rf *Raft) readPersist(state []byte, snapshot []byte) {
+	if len(state) == 0 {
 		return
 	}
-	// Your code here (2C).
-	r := bytes.NewBuffer(data)
-	decoder := labgob.NewDecoder(r)
+	
+	r := bytes.NewBuffer(state)
+	d := labgob.NewDecoder(r)
+
 	var currentTerm int
 	var votedFor int
+var lastIncludedIndex int
+	var lastIncludedTerm int
 	var log []LogEntry
-	if decoder.Decode(&currentTerm) != nil ||
-		decoder.Decode(&votedFor) != nil ||
-		decoder.Decode(&log) != nil {
-		panic("Failed to read persisted state")
-	} else {
+
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil ||
+		d.Decode(&log) != nil {
+		return
+	}
+
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
+rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedTerm = lastIncludedTerm
 		rf.log = log
-	}
+	rf.snapshot = snapshot
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
