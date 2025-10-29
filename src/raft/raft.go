@@ -301,32 +301,42 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here (2A, 2B, 2C).
-	rf.currentTerm = 0
+		rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.state = Follower
 	rf.lastContact = time.Now()
-
-	// initialize random election timeout between 400-600ms
 	rf.electionTimeout = randomElectionTimeout()
+rf.applyCh = applyCh
 
-	rf.log = make([]LogEntry, 1)
-	rf.log[0] = LogEntry{Term: 0, Command: nil} // Dummy entry
-
-	rf.nextIndex = make([]int, len(rf.peers))
-	rf.matchIndex = make([]int, len(rf.peers))
-	for i := range rf.peers {
-		rf.nextIndex[i] = 1
-		rf.matchIndex[i] = 0
+	// restore persisted state (if any)
+	state := persister.ReadRaftState()
+	snapshot := persister.ReadSnapshot()
+	rf.readPersist(state, snapshot)
+	rf.snapshot = persister.ReadSnapshot()
+	if rf.snapshot == nil {
+		rf.snapshot = make([]byte, 0)
 	}
 
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	// ensure there's always at least a dummy entry representing lastIncludedIndex
+	if len(rf.log) == 0 {
+	rf.log = make([]LogEntry, 1)
+	rf.log[0] = LogEntry{Command: nil, Term: 0}
+		rf.lastIncludedIndex = 0
+		rf.lastIncludedTerm = 0
+	}
 
-	// start ticker goroutine to start elections
+	rf.committedIndex = rf.lastIncludedIndex
+	rf.lastApplied = rf.lastIncludedIndex
+
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+	for i := range rf.peers {
+		rf.nextIndex[i] = rf.lastLogIndex() + 1
+		rf.matchIndex[i] = rf.lastIncludedIndex
+	}
+
+		// start ticker and applier
 	go rf.ticker()
-
-	// start applier goroutine to apply committed entries
 	go rf.applier(applyCh)
 
 	return rf
