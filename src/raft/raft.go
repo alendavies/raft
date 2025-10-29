@@ -99,7 +99,6 @@ type Raft struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	// Your code here (2A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -130,13 +129,13 @@ func (rf *Raft) readPersist(state []byte, snapshot []byte) {
 	if len(state) == 0 {
 		return
 	}
-	
+
 	r := bytes.NewBuffer(state)
 	d := labgob.NewDecoder(r)
 
 	var currentTerm int
 	var votedFor int
-var lastIncludedIndex int
+	var lastIncludedIndex int
 	var lastIncludedTerm int
 	var log []LogEntry
 
@@ -148,19 +147,55 @@ var lastIncludedIndex int
 		return
 	}
 
-		rf.currentTerm = currentTerm
-		rf.votedFor = votedFor
-rf.lastIncludedIndex = lastIncludedIndex
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = lastIncludedTerm
-		rf.log = log
+	rf.log = log
 	rf.snapshot = snapshot
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
 
-	// Your code here (2C).
+	// If snapshot is not more recent than current commit index, ignore it
+	if lastIncludedIndex <= rf.committedIndex {
+		return false
+	}
+
+	// Truncate log
+	// Case A: snapshot is within our log
+	if lastIncludedIndex < rf.lastLogIndex() {
+		sliceIdx := rf.sliceIndex(lastIncludedIndex)
+		// If index is within log bounds
+		if sliceIdx >= 0 && sliceIdx < len(rf.log) {
+			// if term matches, keep entries after snapshot
+			if rf.log[sliceIdx].Term == lastIncludedTerm {
+				rf.log = rf.log[sliceIdx+1:]
+			} else {
+				rf.log = make([]LogEntry, 1)
+				rf.log[0] = LogEntry{Term: lastIncludedTerm, Command: nil}
+			}
+		} else {
+			rf.log = make([]LogEntry, 1)
+			rf.log[0] = LogEntry{Term: lastIncludedTerm, Command: nil}
+		}
+	} else {
+		// Caso B: snapshot is beyond our log; discard entire log
+		rf.log = make([]LogEntry, 1)
+		rf.log[0] = LogEntry{Term: lastIncludedTerm, Command: nil}
+	}
+
+	rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedTerm = lastIncludedTerm
+	rf.snapshot = snapshot
+
+	rf.committedIndex = lastIncludedIndex
+	rf.lastApplied = lastIncludedIndex
 
 	return true
 }
@@ -170,8 +205,39 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2C).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
 
+	// If snapshot is older than current snapshot, ignore it
+	if index <= rf.lastIncludedIndex {
+		return
+	}
+
+	// If index is beyond last log index, alredy covered by snapshot
+	if index > rf.lastLogIndex() {
+		// Snapshot includes entire log, discard all log entries
+		rf.lastIncludedIndex = index
+		rf.lastIncludedTerm = rf.lastLogTerm()
+		rf.log = make([]LogEntry, 1)
+		rf.log[0] = LogEntry{Command: nil, Term: rf.lastIncludedTerm}
+	} else {
+		sliceIdx := rf.sliceIndex(index)
+		lastTerm := rf.log[sliceIdx].Term
+
+		// Truncate log: keep only entries after index
+		newLog := make([]LogEntry, 0)
+		newLog = append(newLog, LogEntry{Command: nil, Term: lastTerm})
+		newLog = append(newLog, rf.log[sliceIdx+1:]...)
+
+		rf.log = newLog
+		rf.lastIncludedIndex = index
+		rf.lastIncludedTerm = lastTerm
+	}
+
+	rf.snapshot = snapshot
+	rf.committedIndex = max(rf.committedIndex, index)
+	rf.lastApplied = max(rf.lastApplied, index)
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -187,7 +253,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-		rf.mu.Lock()
+	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	index := -1
@@ -200,10 +266,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// if i'm leader, append to log
 	rf.log = append(rf.log, LogEntry{Command: command, Term: rf.currentTerm})
-index = rf.lastLogIndex()
+	index = rf.lastLogIndex()
 	rf.persist()
 
-		term = rf.currentTerm
+	term = rf.currentTerm
 
 	return index, term, isLeader
 }
@@ -232,10 +298,6 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 
-		// Your code here to check if a leader election should
-		// be started and to randomize sleeping time using
-		// time.Sleep().
-
 		time.Sleep(100 * time.Millisecond)
 
 		rf.mu.Lock()
@@ -246,6 +308,7 @@ func (rf *Raft) ticker() {
 
 		if isLeader {
 			// if i'm leader, send heartbeats and entries
+			rf.sendSnapshot()
 			rf.sendEntries()
 		} else if elapsed >= timeout {
 			// if timeout elapsed, start election
@@ -268,7 +331,7 @@ func (rf *Raft) applier(applyCh chan ApplyMsg) {
 		toApply := []ApplyMsg{}
 		for rf.lastApplied < rf.committedIndex {
 			rf.lastApplied++
-sliceIdx := rf.sliceIndex(rf.lastApplied)
+			sliceIdx := rf.sliceIndex(rf.lastApplied)
 			cmd := rf.log[sliceIdx].Command
 
 			toApply = append(toApply, ApplyMsg{
@@ -301,12 +364,12 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.persister = persister
 	rf.me = me
 
-		rf.currentTerm = 0
+	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.state = Follower
 	rf.lastContact = time.Now()
 	rf.electionTimeout = randomElectionTimeout()
-rf.applyCh = applyCh
+	rf.applyCh = applyCh
 
 	// restore persisted state (if any)
 	state := persister.ReadRaftState()
@@ -319,8 +382,8 @@ rf.applyCh = applyCh
 
 	// ensure there's always at least a dummy entry representing lastIncludedIndex
 	if len(rf.log) == 0 {
-	rf.log = make([]LogEntry, 1)
-	rf.log[0] = LogEntry{Command: nil, Term: 0}
+		rf.log = make([]LogEntry, 1)
+		rf.log[0] = LogEntry{Command: nil, Term: 0}
 		rf.lastIncludedIndex = 0
 		rf.lastIncludedTerm = 0
 	}
@@ -335,7 +398,7 @@ rf.applyCh = applyCh
 		rf.matchIndex[i] = rf.lastIncludedIndex
 	}
 
-		// start ticker and applier
+	// start ticker and applier
 	go rf.ticker()
 	go rf.applier(applyCh)
 
